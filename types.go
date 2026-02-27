@@ -26,12 +26,14 @@ type RAGResult struct {
 
 // CollectionRoute maps a RAG collection to provider/model per pipeline stage
 type CollectionRoute struct {
-	SQLProvider    string `yaml:"sql_provider" json:"sql_provider"`
-	SQLModel       string `yaml:"sql_model" json:"sql_model"`
-	RepairProvider string `yaml:"repair_provider" json:"repair_provider"`
-	RepairModel    string `yaml:"repair_model" json:"repair_model"`
-	ChatProvider   string `yaml:"chat_provider" json:"chat_provider"`
-	ChatModel      string `yaml:"chat_model" json:"chat_model"`
+	SQLProvider    string  `yaml:"sql_provider" json:"sql_provider"`
+	SQLModel       string  `yaml:"sql_model" json:"sql_model"`
+	RepairProvider string  `yaml:"repair_provider" json:"repair_provider"`
+	RepairModel    string  `yaml:"repair_model" json:"repair_model"`
+	ChatProvider   string  `yaml:"chat_provider" json:"chat_provider"`
+	ChatModel      string  `yaml:"chat_model" json:"chat_model"`
+	Threshold      float64 `yaml:"threshold" json:"threshold"`   // per-collection minimum score (0 = use global)
+	Rank           int     `yaml:"rank" json:"rank"`             // priority: lower = higher priority (0 = unranked)
 }
 
 // SQLExecutor runs SQL with optional RLS
