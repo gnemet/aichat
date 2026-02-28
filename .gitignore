@@ -1,2 +1,22 @@
+# Environment Files (Strict Protection)
+.env*
+**/.env*
+!**/*.gpg
+
+# Environment Templates (Vault-Protected)
+opt/**
+!opt/**/
+!*.gpg
+
+# Python
 __pycache__/
+*.pyc
 *.exe
+
+# IDE/System
+.vscode/
+.idea/
+.DS_Store
+
+# Vault password
+.vault_pass
