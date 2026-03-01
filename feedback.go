@@ -3,68 +3,115 @@ package aichat
 import (
 	"database/sql"
 	"encoding/json"
-	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 )
 
-// SaveSQLErrorFeedback writes a structured YAML feedback file when SQL execution fails.
-// These files can be reviewed to identify gaps in MCP chain instructions.
-func SaveSQLErrorFeedback(corporateID, user, question, generatedSQL, pgError, ragTopics, feedbackDir string) {
+// SaveSQLErrorFeedback writes a structured YAML feedback file AND inserts into mcp.feedback
+// when SQL execution fails. The DB insert is the primary record; YAML is kept as backup.
+func SaveSQLErrorFeedback(db *sql.DB, corporateID, user, question, generatedSQL, pgError, ragTopics, feedbackDir string) {
+	// Insert into mcp.feedback (primary)
+	if db != nil {
+		tenant := corporateID
+		if tenant == "" {
+			tenant = "ulyssys"
+		}
+		payload, _ := json.Marshal(map[string]string{
+			"tenant":        tenant,
+			"username":      user,
+			"type":          "sqlerr",
+			"message":       "Auto: SQL execution failed",
+			"question":      question,
+			"generated_sql": generatedSQL,
+			"pg_error":      pgError,
+		})
+		_, err := db.Exec(`SELECT mcp.insert_feedback($1::jsonb)`, string(payload))
+		if err != nil {
+			slog.Error("feedback DB insert failed", "error", err)
+		} else {
+			slog.Info("SQL error feedback saved to mcp.feedback", "user", user)
+		}
+	}
+
+	// Write YAML backup
 	dir := resolveFeedbackDir(corporateID, feedbackDir)
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		fmt.Printf("[AI-CHAT] feedback dir error: %v\n", err)
+		slog.Error("feedback dir error", "error", err)
 		return
 	}
 
 	ts := time.Now()
-	filename := filepath.Join(dir, fmt.Sprintf("%s-%s-sqlerr.yaml", ts.Format("20060102_150405"), user))
+	filename := filepath.Join(dir, ts.Format("20060102_150405")+"-"+user+"-sqlerr.yaml")
 
-	content := fmt.Sprintf(`type: sql_error
-timestamp: "%s"
-user: "%s"
-question: "%s"
-generated_sql: |
-  %s
-pg_error: "%s"
-rag_topics: "%s"
-`, ts.Format(time.RFC3339), user, yamlEscape(question), indentSQL(generatedSQL), yamlEscape(pgError), yamlEscape(ragTopics))
+	content, _ := json.Marshal(map[string]string{
+		"type":          "sql_error",
+		"timestamp":     ts.Format(time.RFC3339),
+		"user":          user,
+		"question":      question,
+		"generated_sql": generatedSQL,
+		"pg_error":      pgError,
+		"rag_topics":    ragTopics,
+	})
 
-	if err := os.WriteFile(filename, []byte(content), 0644); err != nil {
-		fmt.Printf("[AI-CHAT] feedback write error: %v\n", err)
+	if err := os.WriteFile(filename, content, 0644); err != nil {
+		slog.Error("feedback write error", "error", err)
 	} else {
-		fmt.Printf("[AI-CHAT] SQL error feedback saved: %s\n", filename)
+		slog.Info("SQL error feedback saved", "file", filename)
 	}
 }
 
-// SaveZeroResultWarning writes a warning YAML when SQL execution succeeds but returns 0 rows.
-// This helps identify logic flaws or hallucinations in the generated SQL filters.
-func SaveZeroResultWarning(corporateID, user, question, generatedSQL, ragTopics, feedbackDir string) {
+// SaveZeroResultWarning writes a warning YAML AND inserts into mcp.feedback when SQL
+// execution succeeds but returns 0 rows. Helps identify logic flaws or hallucinations.
+func SaveZeroResultWarning(db *sql.DB, corporateID, user, question, generatedSQL, ragTopics, feedbackDir string) {
+	// Insert into mcp.feedback (primary)
+	if db != nil {
+		tenant := corporateID
+		if tenant == "" {
+			tenant = "ulyssys"
+		}
+		payload, _ := json.Marshal(map[string]string{
+			"tenant":        tenant,
+			"username":      user,
+			"type":          "warning",
+			"message":       "Auto: SQL returned 0 rows — check WHERE clause",
+			"question":      question,
+			"generated_sql": generatedSQL,
+		})
+		_, err := db.Exec(`SELECT mcp.insert_feedback($1::jsonb)`, string(payload))
+		if err != nil {
+			slog.Error("warning DB insert failed", "error", err)
+		} else {
+			slog.Info("Zero-result warning saved to mcp.feedback", "user", user)
+		}
+	}
+
+	// Write YAML backup
 	dir := resolveFeedbackDir(corporateID, feedbackDir)
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		fmt.Printf("[AI-CHAT] warning dir error: %v\n", err)
+		slog.Error("warning dir error", "error", err)
 		return
 	}
 
 	ts := time.Now()
-	filename := filepath.Join(dir, fmt.Sprintf("%s-%s-warning.yaml", ts.Format("20060102_150405"), user))
+	filename := filepath.Join(dir, ts.Format("20060102_150405")+"-"+user+"-warning.yaml")
 
-	content := fmt.Sprintf(`type: zero_result_warning
-timestamp: "%s"
-user: "%s"
-question: "%s"
-generated_sql: |
-  %s
-message: "SQL executed successfully but returned 0 rows. Check WHERE clause logic for hallucinated filters."
-rag_topics: "%s"
-`, ts.Format(time.RFC3339), user, yamlEscape(question), indentSQL(generatedSQL), yamlEscape(ragTopics))
+	content, _ := json.Marshal(map[string]string{
+		"type":          "zero_result_warning",
+		"timestamp":     ts.Format(time.RFC3339),
+		"user":          user,
+		"question":      question,
+		"generated_sql": generatedSQL,
+		"message":       "SQL executed successfully but returned 0 rows",
+		"rag_topics":    ragTopics,
+	})
 
-	if err := os.WriteFile(filename, []byte(content), 0644); err != nil {
-		fmt.Printf("[AI-CHAT] warning write error: %v\n", err)
+	if err := os.WriteFile(filename, content, 0644); err != nil {
+		slog.Error("warning write error", "error", err)
 	} else {
-		fmt.Printf("[AI-CHAT] Zero-result warning saved: %s\n", filename)
+		slog.Info("Zero-result warning saved", "file", filename)
 	}
 }
 
@@ -101,13 +148,13 @@ func SaveAuditLog(db *sql.DB, user string, result *PipelineResult) {
 
 	jsonData, err := json.Marshal(data)
 	if err != nil {
-		fmt.Printf("[AI-CHAT] audit log marshal error: %v\n", err)
+		slog.Error("audit log marshal error", "error", err)
 		return
 	}
 
 	_, err = db.Exec(`SELECT mcp.insert_audit_aisql($1::jsonb)`, string(jsonData))
 	if err != nil {
-		fmt.Printf("[AI-CHAT] audit log error: %v\n", err)
+		slog.Error("audit log insert error", "error", err)
 	}
 }
 
@@ -116,7 +163,7 @@ func SaveAuditLog(db *sql.DB, user string, result *PipelineResult) {
 func SaveTrainingEntry(corporateID, question, correctedSQL, feedbackDir string) {
 	dir := resolveFeedbackDir(corporateID, feedbackDir)
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		fmt.Printf("[AI-CHAT] training dir error: %v\n", err)
+		slog.Error("training dir error", "error", err)
 		return
 	}
 
@@ -134,48 +181,47 @@ func SaveTrainingEntry(corporateID, question, correctedSQL, feedbackDir string) 
 
 	jsonLine, err := json.Marshal(entry)
 	if err != nil {
-		fmt.Printf("[AI-CHAT] training marshal error: %v\n", err)
+		slog.Error("training marshal error", "error", err)
 		return
 	}
 
 	f, err := os.OpenFile(trainingFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
-		fmt.Printf("[AI-CHAT] training file error: %v\n", err)
+		slog.Error("training file error", "error", err)
 		return
 	}
 	defer f.Close()
 
 	f.Write(jsonLine)
 	f.Write([]byte("\n"))
-	fmt.Printf("[AI-CHAT] 📝 Training entry saved: %s\n", trainingFile)
+	slog.Info("Training entry saved", "file", trainingFile)
 }
 
-// SaveManualFeedback saves the last Q&A as a YAML feedback file.
+// SaveManualFeedback saves the last Q&A as a JSON feedback file.
 func SaveManualFeedback(user string, result *PipelineResult, feedbackDir string) {
 	dir := resolveFeedbackDir(result.CorporateID, feedbackDir)
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		fmt.Printf("[AI-CHAT] feedback dir error: %v\n", err)
+		slog.Error("feedback dir error", "error", err)
 		return
 	}
 
 	ts := time.Now()
-	filename := filepath.Join(dir, fmt.Sprintf("%s-%s-manual.yaml", ts.Format("20060102_150405"), user))
+	filename := filepath.Join(dir, ts.Format("20060102_150405")+"-"+user+"-manual.json")
 
-	content := fmt.Sprintf(`type: manual
-timestamp: "%s"
-user: "%s"
-question: "%s"
-generated_sql: |
-  %s
-answer: |
-  %s
-rag_topics: "%s"
-`, ts.Format(time.RFC3339), user, yamlEscape(result.UserMessage), indentSQL(result.GeneratedSQL), indentSQL(result.Answer), yamlEscape(result.RAGTopics))
+	content, _ := json.Marshal(map[string]string{
+		"type":          "manual",
+		"timestamp":     ts.Format(time.RFC3339),
+		"user":          user,
+		"question":      result.UserMessage,
+		"generated_sql": result.GeneratedSQL,
+		"answer":        result.Answer,
+		"rag_topics":    result.RAGTopics,
+	})
 
-	if err := os.WriteFile(filename, []byte(content), 0644); err != nil {
-		fmt.Printf("[AI-CHAT] feedback write error: %v\n", err)
+	if err := os.WriteFile(filename, content, 0644); err != nil {
+		slog.Error("feedback write error", "error", err)
 	} else {
-		fmt.Printf("[AI-CHAT] Manual feedback saved: %s\n", filename)
+		slog.Info("Manual feedback saved", "file", filename)
 	}
 
 	SaveTrainingEntry(result.CorporateID, result.UserMessage, result.GeneratedSQL, feedbackDir)

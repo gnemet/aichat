@@ -2,6 +2,7 @@ package aichat
 
 import (
 	"context"
+	"database/sql"
 	"time"
 )
 
@@ -79,14 +80,15 @@ type PipelineResult struct {
 
 // PipelineOptions controls optional pipeline behavior
 type PipelineOptions struct {
-	Feedback         bool   // Save feedback/training files on errors
-	Repair           bool   // Auto-retry SQL errors via LLM fix
-	RLS              bool   // Enable Row-Level Security
-	CorporateID      string // Corporate identifier
-	TodayOverride    string // Override CURRENT_DATE for testing
-	Lang             string // Language override ("hu", "en")
-	LastResultHadSQL bool   // Previous turn used SQL pipeline — bypass relevancy gate for follow-ups
-	LastRAGContext   string // Previous turn's RAG context — reused when follow-up has no RAG match
+	Feedback         bool    // Save feedback/training files on errors
+	Repair           bool    // Auto-retry SQL errors via LLM fix
+	RLS              bool    // Enable Row-Level Security
+	DB               *sql.DB // DB connection for auto-feedback to mcp.feedback (nil = YAML only)
+	CorporateID      string  // Corporate identifier
+	TodayOverride    string  // Override CURRENT_DATE for testing
+	Lang             string  // Language override ("hu", "en")
+	LastResultHadSQL bool    // Previous turn used SQL pipeline — bypass relevancy gate for follow-ups
+	LastRAGContext   string  // Previous turn's RAG context — reused when follow-up has no RAG match
 }
 
 // PipelineConfig holds non-interface configuration for the pipeline

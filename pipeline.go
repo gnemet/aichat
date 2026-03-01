@@ -200,7 +200,7 @@ func RunPipeline(ctx context.Context, client AIClient, ragProvider RAGProvider, 
 			result.Answer = strings.Join(retryLog, "\n") + fmt.Sprintf("\n\nI generated this SQL but it failed to execute:\n\n```sql\n%s\n```\n\nError: %s", generatedSQL, execErr.Error())
 			result.Duration = time.Since(start)
 			if opts.Feedback {
-				go SaveSQLErrorFeedback(opts.CorporateID, user, question, generatedSQL, execErr.Error(), result.RAGTopics, cfg.FeedbackDir)
+				go SaveSQLErrorFeedback(opts.DB, opts.CorporateID, user, question, generatedSQL, execErr.Error(), result.RAGTopics, cfg.FeedbackDir)
 			}
 			return result
 		}
@@ -229,7 +229,7 @@ func RunPipeline(ctx context.Context, client AIClient, ragProvider RAGProvider, 
 			result.Answer = strings.Join(retryLog, "\n") + fmt.Sprintf("\n\nOriginal SQL:\n```sql\n%s\n```\nError: %s", generatedSQL, execErr.Error())
 			result.Duration = time.Since(start)
 			if opts.Feedback {
-				go SaveSQLErrorFeedback(opts.CorporateID, user, question, generatedSQL, execErr.Error(), result.RAGTopics, cfg.FeedbackDir)
+				go SaveSQLErrorFeedback(opts.DB, opts.CorporateID, user, question, generatedSQL, execErr.Error(), result.RAGTopics, cfg.FeedbackDir)
 			}
 			return result
 		}
@@ -255,7 +255,7 @@ func RunPipeline(ctx context.Context, client AIClient, ragProvider RAGProvider, 
 	fmt.Printf("[AI-CHAT] SQL returned %d rows\n", len(rows))
 
 	if len(rows) == 0 && opts.Feedback {
-		go SaveZeroResultWarning(opts.CorporateID, user, question, generatedSQL, result.RAGTopics, cfg.FeedbackDir)
+		go SaveZeroResultWarning(opts.DB, opts.CorporateID, user, question, generatedSQL, result.RAGTopics, cfg.FeedbackDir)
 	}
 
 	// Build result table text for synthesis
