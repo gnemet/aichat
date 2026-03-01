@@ -61,3 +61,27 @@ func indentSQL(s string) string {
 	}
 	return strings.Join(lines, "\n")
 }
+
+// ParsePersonaContent extracts the content after the "## System Prompt" header.
+// If no such header is found, returns the full content (trimmed).
+func ParsePersonaContent(raw string) string {
+	lines := strings.Split(raw, "\n")
+	inSystem := false
+	var sysLines []string
+
+	for _, l := range lines {
+		if strings.TrimSpace(l) == "## System Prompt" {
+			inSystem = true
+			continue
+		}
+		if inSystem {
+			sysLines = append(sysLines, l)
+		}
+	}
+
+	if len(sysLines) > 0 {
+		return strings.TrimSpace(strings.Join(sysLines, "\n"))
+	}
+	// Fallback: return everything (trimmed)
+	return strings.TrimSpace(raw)
+}

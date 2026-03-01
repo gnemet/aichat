@@ -32,8 +32,8 @@ type CollectionRoute struct {
 	RepairModel    string  `yaml:"repair_model" json:"repair_model"`
 	ChatProvider   string  `yaml:"chat_provider" json:"chat_provider"`
 	ChatModel      string  `yaml:"chat_model" json:"chat_model"`
-	Threshold      float64 `yaml:"threshold" json:"threshold"`   // per-collection minimum score (0 = use global)
-	Rank           int     `yaml:"rank" json:"rank"`             // priority: lower = higher priority (0 = unranked)
+	Threshold      float64 `yaml:"threshold" json:"threshold"` // per-collection minimum score (0 = use global)
+	Rank           int     `yaml:"rank" json:"rank"`           // priority: lower = higher priority (0 = unranked)
 }
 
 // SQLExecutor runs SQL with optional RLS
@@ -68,6 +68,7 @@ type PipelineResult struct {
 	Duration     time.Duration
 	Error        string
 	RAGTopics    string // Matched RAG topics for debug
+	RAGContext   string // RAG context used in this pipeline run (stored for follow-up reuse)
 	CorporateID  string // Multi-corporate context
 	// Usage stats (populated if available)
 	PromptTokens     int
@@ -78,18 +79,21 @@ type PipelineResult struct {
 
 // PipelineOptions controls optional pipeline behavior
 type PipelineOptions struct {
-	Feedback      bool   // Save feedback/training files on errors
-	Repair        bool   // Auto-retry SQL errors via LLM fix
-	RLS           bool   // Enable Row-Level Security
-	CorporateID   string // Corporate identifier
-	TodayOverride string // Override CURRENT_DATE for testing
-	Lang          string // Language override ("hu", "en")
+	Feedback         bool   // Save feedback/training files on errors
+	Repair           bool   // Auto-retry SQL errors via LLM fix
+	RLS              bool   // Enable Row-Level Security
+	CorporateID      string // Corporate identifier
+	TodayOverride    string // Override CURRENT_DATE for testing
+	Lang             string // Language override ("hu", "en")
+	LastResultHadSQL bool   // Previous turn used SQL pipeline — bypass relevancy gate for follow-ups
+	LastRAGContext   string // Previous turn's RAG context — reused when follow-up has no RAG match
 }
 
 // PipelineConfig holds non-interface configuration for the pipeline
 type PipelineConfig struct {
 	SQLSystemPrompt   string   // System prompt for SQL generation
 	ChatPersona       string   // Persona for NL synthesis
+	DirectPersona     string   // Persona for direct NL answers (no RAG match)
 	PersonaOverride   string   // Active persona chip content (overrides ChatPersona when set)
 	HungarianKeywords []string // Keywords for Hungarian detection
 	FeedbackDir       string   // Directory for feedback files (default: "data/{corp}/feedback")
@@ -110,12 +114,4 @@ type PipelineConfig struct {
 // DefaultOptions returns PipelineOptions with all features enabled
 func DefaultOptions() PipelineOptions {
 	return PipelineOptions{Feedback: true, Repair: true, RLS: true, CorporateID: "ulyssys"}
-}
-
-// DefaultConfig returns a PipelineConfig with sensible defaults loaded from embedded persona files.
-func DefaultConfig() PipelineConfig {
-	return PipelineConfig{
-		SQLSystemPrompt: LoadPersona("sql"),
-		ChatPersona:     LoadPersona("chat"),
-	}
 }

@@ -24,6 +24,12 @@ func RunPipeline(ctx context.Context, client AIClient, ragProvider RAGProvider, 
 	}
 	ragContext := ragMeta.Context
 
+	// ── SQL Follow-up: reuse previous RAG context when current query has no match ──
+	if ragContext == "" && opts.LastResultHadSQL && opts.LastRAGContext != "" {
+		ragContext = opts.LastRAGContext
+		fmt.Printf("[AI-CHAT] SQL follow-up: reusing previous RAG context (%d bytes)\n", len(ragContext))
+	}
+
 	var ragTopics []string
 	if ragContext != "" {
 		for _, line := range strings.Split(ragContext, "\n") {
@@ -33,6 +39,7 @@ func RunPipeline(ctx context.Context, client AIClient, ragProvider RAGProvider, 
 		}
 	}
 	result.RAGTopics = strings.Join(ragTopics, ", ")
+	result.RAGContext = ragContext // Store for follow-up reuse
 
 	// ── Collection-based model routing ──
 	// If RAG matched a collection and a route is configured, override stage models
@@ -61,16 +68,21 @@ func RunPipeline(ctx context.Context, client AIClient, ragProvider RAGProvider, 
 	}
 
 	// ── Relevancy Gate: skip SQL pipeline for non-DWH questions ──
-	if ragContext == "" && ragProvider.IsRelevancyGateEnabled() {
+	// Bypass gate if previous turn was SQL (follow-up like "tavaly?" should stay in SQL pipeline)
+	if ragContext == "" && ragProvider.IsRelevancyGateEnabled() && !opts.LastResultHadSQL {
 		fmt.Printf("[AI-CHAT] Relevancy gate: no RAG match → direct LLM answer\n")
 
 		langName := resolveLang(opts.Lang, question, cfg.HungarianKeywords)
 
-		directPersona := LoadPersona("direct")
-		directPersona = strings.ReplaceAll(directPersona, "{lang}", langName)
+		var directPersona string
 		if cfg.PersonaOverride != "" {
-			directPersona += "\n\n" + cfg.PersonaOverride
+			directPersona = cfg.PersonaOverride
+		} else if cfg.DirectPersona != "" {
+			directPersona = cfg.DirectPersona
+		} else {
+			fmt.Printf("[AI-CHAT] WARNING: no direct persona configured — using empty system prompt\n")
 		}
+		directPersona = strings.ReplaceAll(directPersona, "{lang}", langName)
 
 		// Direct NL path: honor user's UI provider/model selection
 		directProvider := cfg.ChatProviderOverride
@@ -107,7 +119,7 @@ func RunPipeline(ctx context.Context, client AIClient, ragProvider RAGProvider, 
 
 	sqlSysPrompt := cfg.SQLSystemPrompt
 	if sqlSysPrompt == "" {
-		sqlSysPrompt = LoadPersona("sql")
+		fmt.Printf("[AI-CHAT] WARNING: no SQL system prompt configured — using empty system prompt\n")
 	}
 
 	fmt.Printf("[AI-CHAT] Stage 1: Generating SQL for: %s (user: %s)\n", question, user)
@@ -263,14 +275,14 @@ func RunPipeline(ctx context.Context, client AIClient, ragProvider RAGProvider, 
 
 	persona := cfg.ChatPersona
 	if persona == "" {
-		persona = LoadPersona("chat")
+		fmt.Printf("[AI-CHAT] WARNING: no chat persona configured — using empty system prompt\n")
 	}
 	persona = strings.ReplaceAll(persona, "{lang}", langName)
 	persona = strings.ReplaceAll(persona, "{user}", user)
 	persona = strings.ReplaceAll(persona, "{question}", question)
 	persona = strings.ReplaceAll(persona, "{row_count}", fmt.Sprintf("%d", len(rows)))
 	if cfg.PersonaOverride != "" {
-		persona += "\n\n" + cfg.PersonaOverride
+		persona = cfg.PersonaOverride
 	}
 
 	synthesisPrompt := fmt.Sprintf(

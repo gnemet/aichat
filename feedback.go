@@ -68,7 +68,7 @@ rag_topics: "%s"
 	}
 }
 
-// SaveAuditLog writes query metadata to the rag.audit_log table.
+// SaveAuditLog writes query metadata via mcp.insert_audit_aisql(JSONB) CRUD function.
 func SaveAuditLog(db *sql.DB, user string, result *PipelineResult) {
 	if db == nil {
 		return
@@ -81,20 +81,31 @@ func SaveAuditLog(db *sql.DB, user string, result *PipelineResult) {
 		errMsg = result.Error
 	}
 
-	query := `
-		INSERT INTO rag.audit_log (
-			hl_question, generated_sql, executed_sql, is_modified, 
-			execution_time_ms, result_count, status, error_message, 
-			username, prompt_tokens, completion_tokens, total_tokens, cost
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-	`
 	isModified := strings.TrimSpace(result.GeneratedSQL) != strings.TrimSpace(result.UserMessage)
 
-	_, err := db.Exec(query,
-		result.UserMessage, result.GeneratedSQL, result.GeneratedSQL, isModified,
-		result.Duration.Milliseconds(), result.RowCount, status, errMsg,
-		user, result.PromptTokens, result.CompletionTokens, result.TotalTokens, result.Cost)
+	data := map[string]interface{}{
+		"hl_question":       result.UserMessage,
+		"generated_sql":     result.GeneratedSQL,
+		"executed_sql":      result.GeneratedSQL,
+		"is_modified":       isModified,
+		"execution_time_ms": result.Duration.Milliseconds(),
+		"result_count":      result.RowCount,
+		"status":            status,
+		"error_message":     errMsg,
+		"username":          user,
+		"prompt_tokens":     result.PromptTokens,
+		"completion_tokens": result.CompletionTokens,
+		"total_tokens":      result.TotalTokens,
+		"cost":              result.Cost,
+	}
 
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		fmt.Printf("[AI-CHAT] audit log marshal error: %v\n", err)
+		return
+	}
+
+	_, err = db.Exec(`SELECT mcp.insert_audit_aisql($1::jsonb)`, string(jsonData))
 	if err != nil {
 		fmt.Printf("[AI-CHAT] audit log error: %v\n", err)
 	}
