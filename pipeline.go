@@ -8,6 +8,13 @@ import (
 	"time"
 )
 
+// emit sends a stage event to the observer if one is configured. Nil-safe.
+func emit(obs PipelineObserver, event StageEvent) {
+	if obs != nil {
+		obs.OnStageEvent(event)
+	}
+}
+
 // RunPipeline executes the full NL → SQL → Execute → NL pipeline.
 // This is the unified pipeline used by both JIRAMNTR and Johanna.
 // Pass history to enable multi-turn conversation memory within a session.
@@ -16,18 +23,25 @@ func RunPipeline(ctx context.Context, client AIClient, ragProvider RAGProvider, 
 
 	start := time.Now()
 	result := PipelineResult{UserMessage: question, CorporateID: opts.CorporateID}
+	obs := opts.Observer
 
 	// ── Stage 0: Build RAG context (with collection metadata) ──
+	ragStart := time.Now()
+	emit(obs, StageEvent{Stage: "rag", Status: "start", Message: "Building RAG context"})
+
 	ragMeta, err := ragProvider.BuildContextWithMeta(ctx, question)
 	if err != nil {
-		fmt.Printf("[AI-CHAT] RAG warning: %v\n", err)
+		emit(obs, StageEvent{Stage: "rag", Status: "error", Message: fmt.Sprintf("RAG warning: %v", err), Duration: time.Since(ragStart).Milliseconds()})
+	} else {
+		emit(obs, StageEvent{Stage: "rag", Status: "done", Message: "RAG context built", Duration: time.Since(ragStart).Milliseconds(),
+			Meta: map[string]string{"collection": ragMeta.Collection}})
 	}
 	ragContext := ragMeta.Context
 
 	// ── SQL Follow-up: reuse previous RAG context when current query has no match ──
 	if ragContext == "" && opts.LastResultHadSQL && opts.LastRAGContext != "" {
 		ragContext = opts.LastRAGContext
-		fmt.Printf("[AI-CHAT] SQL follow-up: reusing previous RAG context (%d bytes)\n", len(ragContext))
+		emit(obs, StageEvent{Stage: "rag", Status: "done", Message: fmt.Sprintf("SQL follow-up: reusing previous RAG context (%d bytes)", len(ragContext))})
 	}
 
 	var ragTopics []string
@@ -45,7 +59,7 @@ func RunPipeline(ctx context.Context, client AIClient, ragProvider RAGProvider, 
 	// If RAG matched a collection and a route is configured, override stage models
 	if ragMeta.Collection != "" && cfg.CollectionRoutes != nil {
 		if route, ok := cfg.CollectionRoutes[ragMeta.Collection]; ok {
-			fmt.Printf("[AI-CHAT] Collection route: %q → applying model overrides\n", ragMeta.Collection)
+			emit(obs, StageEvent{Stage: "rag", Status: "done", Message: fmt.Sprintf("Collection route: %q — applying model overrides", ragMeta.Collection)})
 			if route.SQLProvider != "" {
 				cfg.SQLProviderOverride = route.SQLProvider
 			}
@@ -70,7 +84,7 @@ func RunPipeline(ctx context.Context, client AIClient, ragProvider RAGProvider, 
 	// ── Relevancy Gate: skip SQL pipeline for non-DWH questions ──
 	// Bypass gate if previous turn was SQL (follow-up like "tavaly?" should stay in SQL pipeline)
 	if ragContext == "" && ragProvider.IsRelevancyGateEnabled() && !opts.LastResultHadSQL {
-		fmt.Printf("[AI-CHAT] Relevancy gate: no RAG match → direct LLM answer\n")
+		emit(obs, StageEvent{Stage: "relevancy_gate", Status: "skip", Message: "No RAG match → direct LLM answer"})
 
 		langName := resolveLang(opts.Lang, question, cfg.HungarianKeywords)
 
@@ -80,7 +94,7 @@ func RunPipeline(ctx context.Context, client AIClient, ragProvider RAGProvider, 
 		} else if cfg.DirectPersona != "" {
 			directPersona = cfg.DirectPersona
 		} else {
-			fmt.Printf("[AI-CHAT] WARNING: no direct persona configured — using empty system prompt\n")
+			emit(obs, StageEvent{Stage: "relevancy_gate", Status: "error", Message: "No direct persona configured — using empty system prompt"})
 		}
 		directPersona = strings.ReplaceAll(directPersona, "{lang}", langName)
 
@@ -94,15 +108,23 @@ func RunPipeline(ctx context.Context, client AIClient, ragProvider RAGProvider, 
 			directModel = cfg.UserModelOverride
 		}
 
+		aiStart := time.Now()
+		emit(obs, StageEvent{Stage: "ai_generate", Status: "start", Message: "Generating direct AI response",
+			Meta: map[string]string{"provider": directProvider, "model": directModel}})
+
 		directResult, err := client.GenerateContent(ctx, question, history, directPersona, directProvider, directModel)
 		if err != nil {
 			result.Error = fmt.Sprintf("LLM error: %v", err)
+			emit(obs, StageEvent{Stage: "ai_generate", Status: "error", Message: fmt.Sprintf("LLM error: %v", err), Duration: time.Since(aiStart).Milliseconds()})
 		} else {
 			result.Answer = directResult.Content
+			emit(obs, StageEvent{Stage: "ai_generate", Status: "done", Message: "Direct AI response generated", Duration: time.Since(aiStart).Milliseconds()})
 		}
 		result.Duration = time.Since(start)
 		return result
 	}
+
+	emit(obs, StageEvent{Stage: "relevancy_gate", Status: "done", Message: "RAG match found — entering SQL pipeline"})
 
 	// ── Stage 1: NL → SQL (RAG + LLM) ──
 	var sqlPrompt strings.Builder
@@ -119,17 +141,22 @@ func RunPipeline(ctx context.Context, client AIClient, ragProvider RAGProvider, 
 
 	sqlSysPrompt := cfg.SQLSystemPrompt
 	if sqlSysPrompt == "" {
-		fmt.Printf("[AI-CHAT] WARNING: no SQL system prompt configured — using empty system prompt\n")
+		emit(obs, StageEvent{Stage: "nl_to_sql", Status: "error", Message: "No SQL system prompt configured — using empty system prompt"})
 	}
 
-	fmt.Printf("[AI-CHAT] Stage 1: Generating SQL for: %s (user: %s)\n", question, user)
+	sqlStart := time.Now()
+	emit(obs, StageEvent{Stage: "nl_to_sql", Status: "start", Message: fmt.Sprintf("Generating SQL for: %s", question),
+		Meta: map[string]string{"provider": cfg.SQLProviderOverride, "model": cfg.SQLModelOverride, "user": user}})
 
 	sqlResult, err := client.GenerateContent(ctx, sqlPrompt.String(), history, sqlSysPrompt, cfg.SQLProviderOverride, cfg.SQLModelOverride)
 	if err != nil {
 		result.Error = fmt.Sprintf("AI generation error: %v", err)
 		result.Duration = time.Since(start)
+		emit(obs, StageEvent{Stage: "nl_to_sql", Status: "error", Message: fmt.Sprintf("AI generation error: %v", err), Duration: time.Since(sqlStart).Milliseconds()})
 		return result
 	}
+
+	emit(obs, StageEvent{Stage: "nl_to_sql", Status: "done", Message: "SQL generated", Duration: time.Since(sqlStart).Milliseconds()})
 
 	result.PromptTokens = sqlResult.PromptTokens
 	result.CompletionTokens = sqlResult.CompletionTokens
@@ -144,6 +171,7 @@ func RunPipeline(ctx context.Context, client AIClient, ragProvider RAGProvider, 
 		result.Answer = generatedSQL
 		result.GeneratedSQL = ""
 		result.Duration = time.Since(start)
+		emit(obs, StageEvent{Stage: "nl_to_sql", Status: "skip", Message: "Non-SQL response intercepted — returning as direct answer"})
 		return result
 	}
 
@@ -157,7 +185,7 @@ func RunPipeline(ctx context.Context, client AIClient, ragProvider RAGProvider, 
 		}
 		result.GeneratedSQL = ""
 		result.Duration = time.Since(start)
-		fmt.Printf("[AI-CHAT] Intercepted constant-only SELECT (no FROM) — returning as direct answer\n")
+		emit(obs, StageEvent{Stage: "nl_to_sql", Status: "skip", Message: "Constant-only SELECT (no FROM) — returning as direct answer"})
 		return result
 	}
 
@@ -167,7 +195,6 @@ func RunPipeline(ctx context.Context, client AIClient, ragProvider RAGProvider, 
 		generatedSQL = strings.ReplaceAll(generatedSQL, "CURRENT_DATE", fmt.Sprintf("'%s'::date", opts.TodayOverride))
 	}
 	result.GeneratedSQL = generatedSQL
-	fmt.Printf("[AI-CHAT] Generated SQL:\n%s\n", generatedSQL)
 
 	// ── Stage 2: Execute SQL (with auto-retry) ──
 	maxRetries := 0
@@ -180,11 +207,17 @@ func RunPipeline(ctx context.Context, client AIClient, ragProvider RAGProvider, 
 	var execErr error
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
+		execStart := time.Now()
+		emit(obs, StageEvent{Stage: "execute", Status: "start", Message: fmt.Sprintf("Executing SQL (attempt %d/%d)", attempt+1, maxRetries+1)})
+
 		rows, cols, execErr = executor.Execute(user, generatedSQL, opts.RLS)
 		if execErr == nil {
+			emit(obs, StageEvent{Stage: "execute", Status: "done",
+				Message:  fmt.Sprintf("SQL executed successfully (%d rows)", len(rows)),
+				Duration: time.Since(execStart).Milliseconds(),
+				Meta:     map[string]string{"row_count": fmt.Sprintf("%d", len(rows))}})
 			if attempt > 0 {
 				retryLog = append(retryLog, fmt.Sprintf("✅ Query succeeded after %d retry", attempt))
-				fmt.Printf("[AI-CHAT] ✅ SQL succeeded on attempt %d/%d\n", attempt+1, maxRetries+1)
 				if opts.Feedback {
 					go SaveTrainingEntry(opts.CorporateID, question, generatedSQL, cfg.FeedbackDir)
 				}
@@ -192,7 +225,9 @@ func RunPipeline(ctx context.Context, client AIClient, ragProvider RAGProvider, 
 			break
 		}
 
-		fmt.Printf("[AI-CHAT] ⚠️ SQL error (attempt %d/%d): %v\n", attempt+1, maxRetries+1, execErr)
+		emit(obs, StageEvent{Stage: "execute", Status: "error",
+			Message:  fmt.Sprintf("SQL error (attempt %d/%d): %v", attempt+1, maxRetries+1, execErr),
+			Duration: time.Since(execStart).Milliseconds()})
 
 		if attempt == maxRetries {
 			retryLog = append(retryLog, fmt.Sprintf("❌ All %d attempts failed", maxRetries+1))
@@ -207,7 +242,10 @@ func RunPipeline(ctx context.Context, client AIClient, ragProvider RAGProvider, 
 
 		// ── Stage 2.5: Ask LLM to fix the SQL ──
 		retryLog = append(retryLog, fmt.Sprintf("⚠️ SQL error: %s — retrying...", execErr.Error()))
-		fmt.Printf("[AI-CHAT] 🔄 Asking LLM to fix (retry %d/%d)...\n", attempt+1, maxRetries)
+
+		repairStart := time.Now()
+		emit(obs, StageEvent{Stage: "repair", Status: "start", Message: fmt.Sprintf("Asking LLM to fix SQL (retry %d/%d)", attempt+1, maxRetries),
+			Meta: map[string]string{"provider": cfg.RepairProviderOverride, "model": cfg.RepairModelOverride}})
 
 		fixPrompt := fmt.Sprintf(
 			"The following SQL query failed with a PostgreSQL error.\n\n"+
@@ -228,11 +266,14 @@ func RunPipeline(ctx context.Context, client AIClient, ragProvider RAGProvider, 
 			result.Error = fmt.Sprintf("SQL fix attempt failed: %v", fixErr)
 			result.Answer = strings.Join(retryLog, "\n") + fmt.Sprintf("\n\nOriginal SQL:\n```sql\n%s\n```\nError: %s", generatedSQL, execErr.Error())
 			result.Duration = time.Since(start)
+			emit(obs, StageEvent{Stage: "repair", Status: "error", Message: fmt.Sprintf("LLM fix failed: %v", fixErr), Duration: time.Since(repairStart).Milliseconds()})
 			if opts.Feedback {
 				go SaveSQLErrorFeedback(opts.DB, opts.CorporateID, user, question, generatedSQL, execErr.Error(), result.RAGTopics, cfg.FeedbackDir)
 			}
 			return result
 		}
+
+		emit(obs, StageEvent{Stage: "repair", Status: "done", Message: "SQL repaired by LLM", Duration: time.Since(repairStart).Milliseconds()})
 
 		result.PromptTokens += fixResult.PromptTokens
 		result.CompletionTokens += fixResult.CompletionTokens
@@ -246,13 +287,11 @@ func RunPipeline(ctx context.Context, client AIClient, ragProvider RAGProvider, 
 		}
 		result.GeneratedSQL = generatedSQL
 		result.RetryCount = attempt + 1
-		fmt.Printf("[AI-CHAT] 🔄 Fixed SQL:\n%s\n", generatedSQL)
 	}
 
 	result.Columns = cols
 	result.Rows = rows
 	result.RowCount = len(rows)
-	fmt.Printf("[AI-CHAT] SQL returned %d rows\n", len(rows))
 
 	if len(rows) == 0 && opts.Feedback {
 		go SaveZeroResultWarning(opts.DB, opts.CorporateID, user, question, generatedSQL, result.RAGTopics, cfg.FeedbackDir)
@@ -275,7 +314,7 @@ func RunPipeline(ctx context.Context, client AIClient, ragProvider RAGProvider, 
 
 	persona := cfg.ChatPersona
 	if persona == "" {
-		fmt.Printf("[AI-CHAT] WARNING: no chat persona configured — using empty system prompt\n")
+		emit(obs, StageEvent{Stage: "synthesis", Status: "error", Message: "No chat persona configured — using empty system prompt"})
 	}
 	persona = strings.ReplaceAll(persona, "{lang}", langName)
 	persona = strings.ReplaceAll(persona, "{user}", user)
@@ -291,17 +330,21 @@ func RunPipeline(ctx context.Context, client AIClient, ragProvider RAGProvider, 
 			"Provide a natural language answer.",
 		question, len(rows), resultText.String())
 
-	fmt.Printf("[AI-CHAT] Stage 3: Synthesizing NL answer...\n")
+	synthStart := time.Now()
+	emit(obs, StageEvent{Stage: "synthesis", Status: "start", Message: "Synthesizing NL answer",
+		Meta: map[string]string{"provider": cfg.ChatProviderOverride, "model": cfg.ChatModelOverride, "row_count": fmt.Sprintf("%d", len(rows))}})
 
 	synthResult, err := client.GenerateContent(ctx, synthesisPrompt, history, persona, cfg.ChatProviderOverride, cfg.ChatModelOverride)
 	if err != nil {
 		result.Answer = resultText.String()
+		emit(obs, StageEvent{Stage: "synthesis", Status: "error", Message: fmt.Sprintf("Synthesis error: %v — returning raw results", err), Duration: time.Since(synthStart).Milliseconds()})
 	} else {
 		result.Answer = synthResult.Content
 		result.PromptTokens += synthResult.PromptTokens
 		result.CompletionTokens += synthResult.CompletionTokens
 		result.TotalTokens += synthResult.TotalTokens
 		result.Cost += synthResult.Cost
+		emit(obs, StageEvent{Stage: "synthesis", Status: "done", Message: "NL answer synthesized", Duration: time.Since(synthStart).Milliseconds()})
 	}
 
 	// Prepend retry status if SQL was auto-fixed
@@ -310,7 +353,8 @@ func RunPipeline(ctx context.Context, client AIClient, ragProvider RAGProvider, 
 	}
 
 	result.Duration = time.Since(start)
-	fmt.Printf("[AI-CHAT] Pipeline complete in %dms\n", result.Duration.Milliseconds())
+	emit(obs, StageEvent{Stage: "pipeline", Status: "done", Message: fmt.Sprintf("Pipeline complete in %dms", result.Duration.Milliseconds()),
+		Duration: result.Duration.Milliseconds()})
 
 	return result
 }

@@ -78,17 +78,36 @@ type PipelineResult struct {
 	Cost             float64
 }
 
+// ── Pipeline Observability ──
+
+// StageEvent represents a pipeline stage transition for real-time observability.
+// Host applications implement PipelineObserver to receive these events.
+type StageEvent struct {
+	Stage    string            `json:"stage"`              // "rag", "relevancy_gate", "nl_to_sql", "execute", "repair", "synthesis"
+	Status   string            `json:"status"`             // "start", "done", "error", "skip"
+	Message  string            `json:"message"`            // Human-readable description
+	Duration int64             `json:"duration,omitempty"` // Milliseconds (populated on "done")
+	Meta     map[string]string `json:"meta,omitempty"`     // Optional: provider, model, row_count, etc.
+}
+
+// PipelineObserver receives stage events during pipeline execution.
+// Implementations can log, push to WebSocket, etc.
+type PipelineObserver interface {
+	OnStageEvent(event StageEvent)
+}
+
 // PipelineOptions controls optional pipeline behavior
 type PipelineOptions struct {
-	Feedback         bool    // Save feedback/training files on errors
-	Repair           bool    // Auto-retry SQL errors via LLM fix
-	RLS              bool    // Enable Row-Level Security
-	DB               *sql.DB // DB connection for auto-feedback to mcp.feedback (nil = YAML only)
-	CorporateID      string  // Corporate identifier
-	TodayOverride    string  // Override CURRENT_DATE for testing
-	Lang             string  // Language override ("hu", "en")
-	LastResultHadSQL bool    // Previous turn used SQL pipeline — bypass relevancy gate for follow-ups
-	LastRAGContext   string  // Previous turn's RAG context — reused when follow-up has no RAG match
+	Feedback         bool              // Save feedback/training files on errors
+	Repair           bool              // Auto-retry SQL errors via LLM fix
+	RLS              bool              // Enable Row-Level Security
+	DB               *sql.DB           // DB connection for auto-feedback to mcp.feedback (nil = YAML only)
+	CorporateID      string            // Corporate identifier
+	TodayOverride    string            // Override CURRENT_DATE for testing
+	Lang             string            // Language override ("hu", "en")
+	LastResultHadSQL bool              // Previous turn used SQL pipeline — bypass relevancy gate for follow-ups
+	LastRAGContext   string            // Previous turn's RAG context — reused when follow-up has no RAG match
+	Observer         PipelineObserver  // Optional observer for real-time stage events (nil = no-op)
 }
 
 // PipelineConfig holds non-interface configuration for the pipeline
